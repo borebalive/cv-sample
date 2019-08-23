@@ -1,0 +1,443 @@
+/*
+重投影误差
+
+
+载入相机参数
+
+从模板匹配来粗定位，但是工件可能带贴纸。
+从边缘匹配轮廓，但是轮廓形态不确定。
+
+Q:
+1.无畸变后如何重新反推
+2.
+
+*/
+#include <opencv2/opencv.hpp>
+
+#include <iostream>
+#include <string>
+#include <vector>
+
+using namespace std;
+using namespace cv;
+
+
+//void onMouse(int event, int x, int y, int flags, void *ustc);
+bool combineMatrixRT2A(cv::Mat R, cv::Mat T, cv::Mat& A);
+bool partitionMatrixA2RT(cv::Mat A, cv::Mat& R, cv::Mat& T);
+
+
+// 相机参数 by 5.31
+Mat cameraMatrix = (Mat_<double>(3, 3) <<
+	2115.239066478453, 0, 944.1121247015931,
+	0, 2108.635315494252, 604.951666548259,
+	0, 0, 1);
+Mat distCoeffs = (Mat_<double>(1, 5) <<
+	-0.1424255051647013, 0.1157315493614824, 0.001557202281198099, -0.001447847835068597, 0);
+
+
+int main(void)
+{
+
+	Size image_size(1920, 1200);
+	Size window_size(960, 600);
+
+	// 读取图像
+	string inputName = "D:\\img\\1.bmp";
+	Mat inputFrame = imread(inputName);
+
+	if (inputFrame.empty()) {
+		cout << "Error: read image" << endl;
+		return -1;
+	}
+
+	namedWindow("InputFrame", WINDOW_NORMAL);
+	resizeWindow("InputFrame", window_size);
+	imshow("InputFrame", inputFrame);
+
+	// 相机参数
+	Mat mapx = Mat(image_size, CV_32FC1);
+	Mat mapy = Mat(image_size, CV_32FC1);
+	Mat mapR = Mat::eye(3, 3, CV_32F);// 单位矩阵
+
+	Mat newCameraMatrix;
+	newCameraMatrix = getOptimalNewCameraMatrix(cameraMatrix, distCoeffs, image_size, 0, image_size); // 失真系数 0裁剪 1填充
+	
+	initUndistortRectifyMap(cameraMatrix, distCoeffs, mapR, newCameraMatrix, image_size, CV_32FC1, mapx, mapy); // 单目newCameraMatrix通常等于cameraMatrix 
+
+	cout << "newCameraMatrix :" << newCameraMatrix << endl;
+	cout << "cameraMatrix :" << cameraMatrix << endl;
+
+	//cout << "mapx :" << mapx << endl; // x轴映射
+	//cout << "mapy :" << mapy << endl; // y轴映射
+
+	Mat undistort_img;
+	remap(inputFrame, undistort_img, mapx, mapy, INTER_LINEAR); // 去畸变
+	//undistort
+	//undistortPoints
+
+	namedWindow("Undistort", WINDOW_NORMAL);
+	resizeWindow("Undistort", window_size);
+	imshow("Undistort", undistort_img);
+
+	// 直方图
+	//calcHist();
+
+
+	// 还原畸变
+
+	// 亚像素元
+	//Mat resize_img;
+	//pyrUp(inputFrame, resize_img, Size(inputFrame.cols * 2, inputFrame.rows * 2));
+	//pyrDown();
+	//resize();
+
+	/*cout << "cols :" << resize_img.cols << endl;
+	namedWindow("resize", WINDOW_NORMAL);
+	resizeWindow("resize", window_size);
+	imshow("resize", resize_img);*/
+	
+
+	// 预处理
+	Mat blur_img; 
+	//GaussianBlur(inputFrame, blur_img, Size(7, 7), 0); // 高斯模糊
+	int nBilateralFilterValue = 10;
+	bilateralFilter(inputFrame, blur_img, nBilateralFilterValue, nBilateralFilterValue*2, nBilateralFilterValue/2); // 双边滤波
+
+	namedWindow("Blur", WINDOW_NORMAL);
+	resizeWindow("Blur", window_size);
+	imshow("Blur", blur_img);
+
+
+	Mat gray_img;
+	cvtColor(blur_img, gray_img, COLOR_BGR2GRAY); // 灰度化
+ 
+	namedWindow("Gray", WINDOW_NORMAL);
+	resizeWindow("Gray", window_size);
+	imshow("Gray", gray_img);
+
+
+	// DPM(Deformable Parts Model)
+	//moments(); // HuMoments
+
+	//Laplacian
+	
+	Mat grad_x, grad_y, grad;
+	Mat abs_grad_x, abs_grad_y;
+	Sobel(gray_img, grad_x, CV_16S, 1, 0, 3); // CV_16S - 梯度会出现负值
+	Sobel(gray_img, grad_y, CV_16S, 0, 1, 3);
+	convertScaleAbs(grad_x, abs_grad_x);
+	convertScaleAbs(grad_y, abs_grad_y);
+	addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0, grad); // 近似
+
+	namedWindow("grad_x", WINDOW_NORMAL);
+	resizeWindow("grad_x", window_size);
+	imshow("grad_x", abs_grad_x);
+
+	namedWindow("grad_y", WINDOW_NORMAL);
+	resizeWindow("grad_y", window_size);
+	imshow("grad_y", abs_grad_y);
+
+	namedWindow("grad", WINDOW_NORMAL);
+	resizeWindow("grad", window_size);
+	imshow("grad", grad);
+
+
+	// Edge Detector 边缘检测
+	Mat canny_img;
+	Canny(gray_img, canny_img, 90, 90, 3);
+
+	namedWindow("Canny", WINDOW_NORMAL);
+	resizeWindow("Canny", window_size);
+	imshow("Canny", canny_img);
+
+
+	// kmeans
+	const int MAX_CLUSTERS = 5;
+    Vec3b colorTab[] =
+    {
+        Vec3b(0, 0, 255),
+        Vec3b(0, 255, 0),
+        Vec3b(255, 100, 100),
+        Vec3b(255, 0, 255),
+        Vec3b(0, 255, 255)
+    };
+
+	//将图片的每个像素点的三通道值作为一个特征，因此会得到一个n行3列的特征矩阵data
+	Mat data;
+    for (int i = 0; i < inputFrame.rows;i++)
+		for (int j = 0; j < inputFrame.cols; j++)
+		{
+			Vec3b point = inputFrame.at<Vec3b>(i, j);
+			Mat tmp = (Mat_<float>(1, 3) << point[0], point[1], point[2]);
+			data.push_back(tmp);
+		}
+
+
+	Mat bestLabels;
+    kmeans(data, 3, bestLabels, TermCriteria(TermCriteria::EPS + TermCriteria::COUNT, 10, 1.0), 3, KMEANS_RANDOM_CENTERS);
+
+    int n = 0;
+    //显示聚类结果，不同的类别用不同的颜色显示
+	for (int i = 0; i < pic.rows; i++)
+	{
+		for (int j = 0; j < pic.cols; j++)
+		{
+			int clusterIdx = labels.at<int>(n);
+			pic.at<Vec3b>(i, j) = colorTab[clusterIdx];
+			n++;
+		}
+	}
+		
+    imshow("pic", pic);
+
+	
+	Mat show_img = inputFrame.clone(); // 显示用
+
+
+	Mat binary_img;
+	//threshold(gray_img, binary_img, 0, 255, THRESH_BINARY | THRESH_OTSU);
+	adaptiveThreshold(gray_img, binary_img, 255, ADAPTIVE_THRESH_MEAN_C, THRESH_BINARY, 55, 0); // 阈值化
+
+	namedWindow("binary", WINDOW_NORMAL);
+	resizeWindow("binary", window_size);
+	imshow("binary", binary_img);
+
+	
+	// 图形学
+	Mat dilate_img;
+	Mat element = getStructuringElement(MORPH_RECT, Size(9, 9));//5
+	morphologyEx(binary_img, dilate_img, MORPH_OPEN, element);//MORPH_ERODE MORPH_DILATE MORPH_OPEN MORPH_CLOSE MORPH_GRADIENT
+	namedWindow("dilate", WINDOW_NORMAL);
+	resizeWindow("dilate", window_size);
+	imshow("dilate", dilate_img);
+	//waitKey();
+
+
+/*
+	/// <summary>Contours.</summary>
+	vector<vector<Point> > contours;
+	findContours(dilate_img, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+	cout << "Contours Size:" << contours.size() << endl;
+	Mat contour_img = Mat::zeros(inputFrame.size(), CV_8UC1);;
+	drawContours(contour_img, contours, -1, Scalar::all(255));
+	namedWindow("Contour", WINDOW_NORMAL);
+	resizeWindow("Contour", window_size);
+	imshow("Contour", contour_img);
+	//waitKey();
+
+
+	/// <summary>Max Area Contour.</summary>
+	sort(contours.begin(), contours.end(), [](vector<Point> x, vector<Point> y)
+	{
+		return contourArea(x) > contourArea(y);
+	});
+	cout << "maxArea:" << contourArea(*contours.begin()) << endl;
+	Mat maxContour_img = Mat::zeros(inputFrame.size(), CV_8UC3);;
+	drawContours(maxContour_img, contours, 0, Scalar(0, 255, 0), 6);
+	namedWindow("maxContour", WINDOW_NORMAL);
+	resizeWindow("maxContour", window_size);
+	imshow("maxContour", show_img + maxContour_img);
+	//waitKey();
+
+
+	/// <summary>Approximates a polygonal curves with the specified precision.</summary>
+	vector<vector<Point> > contours_ploy(1);
+	double epsilon = 5;
+	do
+	{
+		contours_ploy[0].clear();
+		approxPolyDP(contours[0], contours_ploy[0], epsilon, true);
+		epsilon += 5;
+	} while (contours_ploy[0].size() > 4);
+
+	cout << "contours_ploy[0]:" << contours_ploy[0] << endl;
+	cout << "epsilon:" << epsilon << endl;
+
+	Mat approxPoly_img = Mat::zeros(inputFrame.size(), CV_8UC3);
+	drawContours(approxPoly_img, contours_ploy, -1, Scalar(0, 0, 255), 16);
+	namedWindow("approxPoly", WINDOW_NORMAL);
+	resizeWindow("approxPoly", window_size);
+	imshow("approxPoly", show_img + approxPoly_img);
+	//waitKey();
+
+
+	/// 筛选步骤:假设包含了所有内正侧顶点
+	//包含侧顶点有两种：但点数都是6，
+	//模板匹配+颜色识别
+	Point mid_point;
+	for (vector<Point>::iterator iter = contours_ploy[0].begin(); iter != contours_ploy[0].end(); ++iter)
+	{
+		mid_point += *iter / static_cast<int>(contours_ploy[0].size());
+	}
+
+	cout << "mid point:" << mid_point << endl;
+
+	vector<Point> intersection(4);//?
+	if (4 == contours_ploy[0].size())
+	{
+		for (vector<Point>::iterator iter = contours_ploy[0].begin(); iter != contours_ploy[0].end(); ++iter)
+		{
+			if ((*iter).x < mid_point.x && (*iter).y < mid_point.y)			intersection[0] = *iter;
+			else if ((*iter).x > mid_point.x && (*iter).y < mid_point.y)	intersection[1] = *iter;
+			else if ((*iter).x > mid_point.x && (*iter).y > mid_point.y)	intersection[2] = *iter;
+			else if ((*iter).x < mid_point.x && (*iter).y > mid_point.y)	intersection[3] = *iter;
+
+		}
+	}
+
+	cout << "intersection:" << intersection << endl;
+
+
+	/// feature
+	vector<Point2f> featurePoint[4];
+	for (int i = 0; i<4; ++i)
+	{
+		Mat mask_img = Mat::zeros(inputFrame.size(), CV_8UC1);
+		circle(mask_img, intersection[i], 15, Scalar::all(255), FILLED);//15
+		goodFeaturesToTrack(gray_img, featurePoint[i], 1, 0.01, 5, mask_img, 3);//5,3
+		cout << "featurePoint" << i << ":" << featurePoint[i] << endl;
+		mask_img.release();
+	}
+	namedWindow("feature", WINDOW_NORMAL);
+	resizeWindow("feature", window_size);
+	imshow("feature", show_img);
+	//waitKey();
+
+
+	/// SubPixel
+	vector<Point2f> subPixelPoints;
+	subPixelPoints.push_back(featurePoint[0][0]);
+	subPixelPoints.push_back(featurePoint[1][0]);
+	subPixelPoints.push_back(featurePoint[2][0]);
+	subPixelPoints.push_back(featurePoint[3][0]);
+
+	cornerSubPix(gray_img, subPixelPoints, Size(7, 7), Size(-1, -1),//5
+		TermCriteria(CV_TERMCRIT_ITER + CV_TERMCRIT_EPS, 50, 0.01));
+	cout << "subPixel" << subPixelPoints << endl;
+
+	for (int i = 0; i < subPixelPoints.size(); ++i)
+	{
+		circle(show_img, subPixelPoints[i], 12, Scalar(0, 0, 255), -1, 8);
+	}
+	imshow("feature", show_img);
+	//waitKey();
+
+
+	/// remap
+	//畸变？
+	//subPixelPoints
+
+	Point2f mid_subPixel;
+	for (vector<Point2f>::iterator iter = subPixelPoints.begin(); iter != subPixelPoints.end(); ++iter)
+	{
+		mid_subPixel += *iter / static_cast<int>(subPixelPoints.size());
+	}
+	cout << "mid subPixel:" << mid_subPixel << endl;
+
+
+	/// <summary>solve PnP.</summary>
+	// 设定工件中心为世界坐标的原点，顺时针输入
+	vector<Point3f> object_points;
+	object_points.push_back(Point3f(-220.0f, +130.0f, 0));
+	object_points.push_back(Point3f(+220.0f, +130.0f, 0));
+	object_points.push_back(Point3f(+220.0f, -130.0f, 0));
+	object_points.push_back(Point3f(-220.0f, -130.0f, 0));
+
+	Mat rvec, tvec;
+	solvePnPRansac(object_points, subPixelPoints, cameraMatrix, Mat(), rvec, tvec, false);//distCoeffs
+
+	Mat R;
+	Rodrigues(rvec, R);
+	*/
+
+	/// 释放
+	waitKey();
+
+	destroyAllWindows();
+
+	return 0;
+}
+
+void onMouse(int event, int x, int y, int flags, void *ustc)
+{
+	Mat& image = *(cv::Mat*) ustc;
+	switch (event)
+	{
+	case CV_EVENT_LBUTTONDOWN:
+	{
+		cout << "x:" << x << " y:" << y << endl;
+	}break;
+	}
+}
+
+bool combineMatrixRT2A(cv::Mat R, cv::Mat T, cv::Mat& A)
+{
+	if (R.rows != 3 || R.cols != 3 || T.rows != 3 || T.cols != 1)
+	{
+		cout << "R T input err" << endl;
+		return false;
+	}
+
+	cv::Mat A_temp;
+	Mat_<double> Zero = (Mat_<double>(1, 4) << 0, 0, 0, 1);
+
+	hconcat(R, T, A_temp);
+	vconcat(A_temp, Zero, A);
+
+	return true;
+}
+
+bool partitionMatrixA2RT(cv::Mat A, cv::Mat& R, cv::Mat& T)
+{
+	if (A.rows != 4 || A.cols != 4)
+	{
+		cout << "A input err" << endl;
+		return false;
+	}
+
+	R = A(Range(0, 3), Range(0, 3));
+	T = A(Range(0, 3), Range(3, 4));
+
+	return true;
+}
+
+void writeYMLFile(void)
+{
+	Mat RefPoseR = (cv::Mat_<double>(3, 3) <<
+		1, 0, 0,
+		0, 1, 0,
+		0, 0, 1);
+
+	Mat RefPoseT = (cv::Mat_<double>(3, 1) <<
+		0, 0, 0);
+
+	FileStorage fs("123.yml", FileStorage::WRITE);
+	if (fs.isOpened())
+	{
+		fs << "R" << RefPoseR;
+		fs << "T" << RefPoseT;
+		fs.release();
+	}
+	else
+		cout << "write YMLFile Hand2Object failed." << endl;
+}
+
+void getCameraMatrix(cv::Mat R_object2hand, cv::Mat T_object2hand,
+	cv::Mat R_RealCheer2hand, cv::Mat T_RealCheer2hand,
+	cv::Mat& R_object2RealCheer, cv::Mat& T_object2RealCheer)
+{
+	cv::Mat A_object2hand;
+	combineMatrixRT2A(R_object2hand, T_object2hand, A_object2hand);
+
+	cv::Mat A_RealCheer2hand;
+	combineMatrixRT2A(R_RealCheer2hand, T_RealCheer2hand, A_RealCheer2hand);
+
+	cv::Mat A_RealCheer2hand_inv;
+	A_RealCheer2hand_inv = A_RealCheer2hand.inv();
+
+	cv::Mat A_object2RealCheer;
+	A_object2RealCheer = A_object2hand * A_RealCheer2hand_inv;
+
+	partitionMatrixA2RT(A_object2RealCheer, R_object2RealCheer, T_object2RealCheer);
+}
